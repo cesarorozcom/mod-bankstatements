@@ -1,0 +1,7 @@
+aws_region = "us-east-1"
+project_name = "text-extract-demo"
+environment = "dev"
+db_username = "postgresadmin"
+db_password = "ChangeMeStrongPassword123!"
+db_instance_class = "db.t3.micro"
+db_allocated_storage = 20
