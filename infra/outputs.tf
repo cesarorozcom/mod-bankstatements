@@ -18,16 +18,6 @@ output "lambda_role_arn" {
   value       = module.iam.lambda_role_arn
 }
 
-output "database_host" {
-  description = "Hostname for the PostgreSQL database"
-  value       = module.database.db_host
-}
-
-output "database_name" {
-  description = "Database name for the PostgreSQL database"
-  value       = module.database.db_name
-}
-
 output "step_functions_arn" {
   description = "ARN of the orchestration state machine"
   value       = module.stepfunctions.state_machine_arn

@@ -1,9 +1,11 @@
 # ADR 0001: Serverless Textract Orchestration and CSV Data Sink
 
-- Status: Accepted
+- Status: Accepted (async-completion approach superseded by ADR 0003)
 - Date: 2026-09-07
 - Deciders: Project maintainers
 - Technical story: Convert PDF bank statements into structured movement records and persist export artifacts as CSV in S3.
+
+> Note: The asynchronous-completion approach described below (polling get_document_analysis inside export_csv) was later replaced. Textract completion is now event-driven: Textract publishes to an SNS topic, which triggers a processor Lambda that invokes export_csv. See ADR 0003.
 
 ## Context
 

@@ -1,3 +1,19 @@
+"""Stage 1 of the document workflow: render PDF pages to JPEG images.
+
+This Lambda is the first task in the Step Functions state machine. It reads an
+incoming PDF from S3, renders each page to a JPEG using PyMuPDF (fitz), and
+writes the images to the rendered bucket. The returned rendered_keys are passed
+to the next stage (start_textract_job).
+
+Event shapes accepted:
+- Step Functions input: {"source_bucket": "...", "source_key": "incoming/x.pdf"}
+- Raw S3 event: {"Records": [{"s3": {"bucket": {"name": ...}, "object": {"key": ...}}}]}
+
+Environment variables:
+- INCOMING_BUCKET: bucket holding the source PDFs.
+- RENDERED_BUCKET: bucket the rendered JPEGs are written to.
+"""
+
 import os
 from urllib.parse import unquote_plus
 
@@ -20,7 +36,12 @@ s3 = make_s3_repo()
 
 
 def handler(event, context):
-    """Render incoming PDF pages to JPEG in an S3 bucket, supporting both S3 and Step Functions events."""
+    """Render incoming PDF pages to JPEG in S3.
+
+    Supports both a direct S3 event (Records) and a Step Functions input
+    carrying source_bucket/source_key. Non-PDF keys or missing keys are
+    ignored. Returns the rendered bucket and the list of rendered page keys.
+    """
     incoming_bucket = os.environ["INCOMING_BUCKET"]
     rendered_bucket = os.environ["RENDERED_BUCKET"]
 
@@ -52,6 +73,12 @@ def handler(event, context):
 
 
 def _render_pdf(bucket, key, rendered_bucket):
+    """Download one PDF, render every page to a JPEG, and upload them.
+
+    Each page is rendered at 2x zoom for higher OCR fidelity and written to
+    rendered_bucket as ``<original_key_without_.pdf>_page_<n>.jpg``. Returns a
+    status dict with the rendered bucket and the ordered list of page keys.
+    """
     download_path = "/tmp/input.pdf"
     s3.download_to_temp(bucket, key, download_path)
 
@@ -84,18 +111,3 @@ def _render_pdf(bucket, key, rendered_bucket):
     }
 
 
-if __name__ == "__main__":
-    # For local testing
-    os.environ["INCOMING_BUCKET"] = "ledger-receipts-dev"
-    os.environ["RENDERED_BUCKET"] = "ledger-receipts-render-dev"
-    test_event = {
-        "Records": [
-            {
-                "s3": {
-                    "bucket": {"name": os.environ.get("INCOMING_BUCKET", "test-bucket")},
-                    "object": {"key": "bank-statements/e_202607.pdf"},
-                }
-            }
-        ]
-    }
-    print(handler(test_event, None))

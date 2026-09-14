@@ -49,40 +49,63 @@ def _extract_rendered(event):
     #return os.environ.get("RENDERED_BUCKET"), ""
 
 
+def _notification_channel():
+    """Build the NotificationChannel so Textract publishes completion to SNS.
+
+    Returns None when the topic/role env vars are absent (e.g. local runs),
+    so the job still starts without notifications.
+    """
+    topic_arn = os.environ.get("TEXTRACT_SNS_TOPIC_ARN")
+    role_arn = os.environ.get("TEXTRACT_PUBLISH_ROLE_ARN")
+    if topic_arn and role_arn:
+        return {"SNSTopicArn": topic_arn, "RoleArn": role_arn}
+    return None
+
+
 def handler(event, context):
-    """Trigger one or more AWS Textract analysis jobs for rendered image keys."""
+    """Trigger one or more AWS Textract analysis jobs for rendered image keys.
+
+    Each job is started asynchronously with a NotificationChannel so Textract
+    publishes a completion message to SNS. Downstream completion handling
+    (process_textract_result -> export_csv) is driven by that notification, so
+    this function returns immediately after starting the jobs.
+    """
     rendered_bucket = _extract_rendered(event) or os.environ.get("RENDERED_BUCKET")
     textract_bucket = os.environ["TEXTRACT_BUCKET"]
-    #source_bucket, source_key = _extract_source(event)
     rendered_keys = _extract_rendered_keys(event)
 
     if not rendered_keys:
         return {"status": "ignored", "event": event}
 
+    notification_channel = _notification_channel()
+
     jobs = []
     for key in rendered_keys:
         bucket = rendered_bucket
-        response = textract.start_document_analysis(
-            DocumentLocation={
+        params = {
+            "DocumentLocation": {
                 "S3Object": {
                     "Bucket": bucket,
                     "Name": key,
                 }
             },
-            FeatureTypes=["TABLES", "FORMS"],
-            OutputConfig={
+            "FeatureTypes": ["TABLES", "FORMS"],
+            "OutputConfig": {
                 "S3Bucket": textract_bucket,
                 "S3Prefix": "results",
             },
-        )
+        }
+        if notification_channel:
+            params["NotificationChannel"] = notification_channel
+
+        response = textract.start_document_analysis(**params)
         jobs.append(
             {
                 "status": "ok",
                 "job_id": response["JobId"],
-                "texrtract_bucket": textract_bucket,
-                # Add key suffix to indicate which page/image this job corresponds to
-                #"key_suffix": key.split("/")[-1],
-                #"document_key": key,
+                "textract_bucket": textract_bucket,
+                "rendered_bucket": rendered_bucket,
+                "rendered_key": key,
             }
         )
 
@@ -94,11 +117,3 @@ def handler(event, context):
     }
 
 
-if __name__ == "__main__":
-    #os.environ["RENDERED_BUCKET"] = "ledger-receipts-render-dev"
-    os.environ["TEXTRACT_BUCKET"] = "ledger-receipts-textract-dev"
-    os.environ["AWS_REGION"] = "us-east-1"
-    # For local testing
-    test_event = {'status': 'ok', 'rendered_bucket': 'ledger-receipts-render-dev', 'rendered_keys': ['bank-statements/e_202607_page_1.jpg', 'bank-statements/e_202607_page_2.jpg']}
-    result = handler(test_event, None)
-    print(result)

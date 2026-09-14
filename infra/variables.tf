@@ -15,28 +15,3 @@ variable "environment" {
   type        = string
   default     = "dev"
 }
-
-variable "db_username" {
-  description = "Master username for the PostgreSQL database"
-  type        = string
-  default     = "postgresadmin"
-  sensitive   = true
-}
-
-variable "db_password" {
-  description = "Master password for the PostgreSQL database"
-  type        = string
-  sensitive   = true
-}
-
-variable "db_instance_class" {
-  description = "Instance class for the PostgreSQL database"
-  type        = string
-  default     = "db.t3.micro"
-}
-
-variable "db_allocated_storage" {
-  description = "Allocated storage in GB for the PostgreSQL database"
-  type        = number
-  default     = 20
-}
