@@ -38,23 +38,27 @@ variable "data_bucket" {
   type        = string
 }
 
-variable "db_host" {
-  description = "Database hostname"
+variable "pymupdf_layer_arn" {
+  description = "ARN of the PyMuPDF Lambda layer"
   type        = string
 }
 
-variable "db_name" {
-  description = "Database name"
+variable "trp_layer_arn" {
+  description = "ARN of the amazon-textract-response-parser Lambda layer"
   type        = string
 }
 
-variable "db_username" {
-  description = "Database username"
+variable "shared_layer_arn" {
+  description = "ARN of the shared internal utilities Lambda layer"
   type        = string
 }
 
-variable "db_password" {
-  description = "Database password"
+variable "textract_completion_topic_arn" {
+  description = "ARN of the SNS topic Textract publishes job completion to"
   type        = string
-  sensitive   = true
+}
+
+variable "textract_publish_role_arn" {
+  description = "ARN of the role Textract assumes to publish completion messages"
+  type        = string
 }
