@@ -13,6 +13,11 @@ override.tf.json
 lambda/build/
 *.zip
 
+# Lambda layer compiled dependencies (pip install output)
+lambda/layers/pymupdf/python/
+lambda/layers/trp/python/
+# shared layer source is tracked; only exclude compiled artifacts if any
+
 # Python
 __pycache__/
 *.pyc

@@ -1,7 +1,28 @@
+"""Final stage of the document workflow: export Textract results to CSV.
+
+This Lambda is invoked (asynchronously) by process_textract_result once a
+Textract job has completed successfully. For each job it fetches the full
+GetDocumentAnalysis result, parses table rows into the normalized movement
+schema, and writes a CSV to the data bucket under ``exports/{job_id}.csv``.
+
+Because completion is event-driven, this function assumes jobs are already
+finished; it does not poll Textract for job status.
+
+Movement schema (CSV columns):
+    movement_id, operation_date, value_date, description, credits, debit, balance
+
+Event shapes accepted (see _extract_jobs):
+- {"jobs": [{"job_id": "...", ...}, ...]}  (from process_textract_result)
+- {"job_id": "..."}                         (single job)
+- {"start_textract_result": {"jobs": [...]}} (legacy/manual test context)
+
+Environment variables:
+- DATA_BUCKET: bucket the exported CSV files are written to.
+"""
+
 import csv
 import io
 import os
-import time
 from datetime import date, datetime as dt
 from urllib.parse import quote_plus
 from typing import Any, Dict, List
@@ -37,10 +58,16 @@ DATE_FORMAT = "%d-%m-%Y"
 s3 = make_s3_repo()
 
 def _extract_jobs(event: Dict[str, Any]) -> List[Dict[str, Any]]:
+    # Shape 1: invoked directly by Step Functions with {"jobs": [...]}
     if event.get("jobs"):
         return event["jobs"]
+    # Shape 2: single job passed directly {"job_id": "..."}
     if event.get("job_id"):
         return [event]
+    # Shape 3: full state machine context still present (e.g. manual test runs)
+    start_textract_result = event.get("start_textract_result")
+    if start_textract_result and start_textract_result.get("jobs"):
+        return start_textract_result["jobs"]
     return []
 
 
@@ -118,18 +145,6 @@ def _extract_movements_from_document(response):
     return movements
 
 
-def _wait_for_analysis(textract_client, job_id, max_attempts=30, poll_seconds=5):
-    for _ in range(max_attempts):
-        response = textract_client.get_document_analysis(JobId=job_id)
-        status = response.get("JobStatus")
-        if status in {"SUCCEEDED", "PARTIALLY_SUCCEEDED"}:
-            return response
-        if status in {"FAILED", "CANCELED", "ABORTED"}:
-            raise RuntimeError(f"Textract analysis failed for job {job_id}: {status}")
-        time.sleep(poll_seconds)
-    raise TimeoutError(f"Textract job {job_id} did not complete within the polling window")
-
-
 def handler(event, context):
     jobs = _extract_jobs(event)
     if not jobs:
@@ -181,9 +196,3 @@ def handler(event, context):
         "status": "ok",
     }
 
-if __name__ == "__main__":
-    os.environ["AWS_REGION"] = "us-east-1"
-    os.environ["DATA_BUCKET"] = "ledger-receipts-data-dev"
-    # For local testing
-    test_event = {'status': 'ok', 'jobs': [{'status': 'ok', 'job_id': '94f08eb48bb45976a8ad72e05fb90e62c4d1787344ef4e0d6f3d865518a68220', 'texrtract_bucket': 'ledger-receipts-textract-dev'}, {'status': 'ok', 'job_id': 'd50d06c7c7885cb6775d33129d673d794186846914e30744f2cb868748406d87', 'texrtract_bucket': 'ledger-receipts-textract-dev'}]}
-    print(handler(test_event, None))

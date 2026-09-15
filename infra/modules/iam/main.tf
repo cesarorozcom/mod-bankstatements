@@ -49,6 +49,29 @@ resource "aws_iam_policy" "lambda_s3_textract_access" {
           "textract:GetDocumentTextDetection"
         ]
         Resource = "*"
+      },
+      {
+        # start_textract_job passes the Textract publish role in the
+        # NotificationChannel; process_textract_result invokes export_csv.
+        Sid    = "AllowPassTextractPublishRole"
+        Effect = "Allow"
+        Action = ["iam:PassRole"]
+        Resource = [
+          "arn:aws:iam::*:role/${var.project_name}-${var.environment}-textract-publish"
+        ]
+        Condition = {
+          StringEquals = {
+            "iam:PassedToService" = "textract.amazonaws.com"
+          }
+        }
+      },
+      {
+        Sid    = "AllowInvokeExportCsv"
+        Effect = "Allow"
+        Action = ["lambda:InvokeFunction"]
+        Resource = [
+          "arn:aws:lambda:*:*:function:${var.project_name}-${var.environment}-export-csv"
+        ]
       }
     ]
   })

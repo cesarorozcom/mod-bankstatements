@@ -26,6 +26,26 @@ data "archive_file" "export_csv" {
   excludes    = ["pdf_to_jpeg/__pycache__", "start_textract_job/__pycache__", "process_textract_result/__pycache__", "export_csv/__pycache__", "shared/__pycache__"]
 }
 
+resource "aws_cloudwatch_log_group" "pdf_to_jpeg" {
+  name              = "/aws/lambda/${var.project_name}-${var.environment}-pdf-to-jpeg"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "start_textract_job" {
+  name              = "/aws/lambda/${var.project_name}-${var.environment}-start-textract-job"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "process_textract_result" {
+  name              = "/aws/lambda/${var.project_name}-${var.environment}-process-textract-result"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "export_csv" {
+  name              = "/aws/lambda/${var.project_name}-${var.environment}-export-csv"
+  retention_in_days = 14
+}
+
 resource "aws_lambda_function" "pdf_to_jpeg" {
   function_name = "${var.project_name}-${var.environment}-pdf-to-jpeg"
   role          = var.lambda_role_arn
@@ -37,34 +57,23 @@ resource "aws_lambda_function" "pdf_to_jpeg" {
   filename         = data.archive_file.pdf_to_jpeg.output_path
   source_code_hash = data.archive_file.pdf_to_jpeg.output_base64sha256
 
+  layers = [var.pymupdf_layer_arn, var.shared_layer_arn]
+
+  depends_on = [aws_cloudwatch_log_group.pdf_to_jpeg]
+
   environment {
     variables = {
       INCOMING_BUCKET = var.incoming_bucket
       RENDERED_BUCKET = var.rendered_bucket
-      AWS_REGION      = var.aws_region
     }
   }
 }
 
 resource "aws_lambda_permission" "allow_s3_pdf_to_jpeg" {
-  statement_id  = "AllowS3InvokePdfToJpeg"
+  statement_id  = "AllowStepFunctionsInvokePdfToJpeg"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.pdf_to_jpeg.function_name
-  principal     = "s3.amazonaws.com"
-  source_arn    = "arn:aws:s3:::${var.incoming_bucket}"
-}
-
-resource "aws_s3_bucket_notification" "incoming_pdf_notification" {
-  bucket = var.incoming_bucket
-
-  lambda_function {
-    lambda_function_arn = aws_lambda_function.pdf_to_jpeg.arn
-    events              = ["s3:ObjectCreated:*"]
-    filter_prefix       = "incoming/"
-    filter_suffix       = ".pdf"
-  }
-
-  depends_on = [aws_lambda_permission.allow_s3_pdf_to_jpeg]
+  principal     = "states.amazonaws.com"
 }
 
 resource "aws_lambda_function" "start_textract_job" {
@@ -78,35 +87,26 @@ resource "aws_lambda_function" "start_textract_job" {
   filename         = data.archive_file.start_textract_job.output_path
   source_code_hash = data.archive_file.start_textract_job.output_base64sha256
 
+  layers = [var.shared_layer_arn]
+
+  depends_on = [aws_cloudwatch_log_group.start_textract_job]
+
   environment {
     variables = {
-      RENDERED_BUCKET = var.rendered_bucket
-      TEXTRACT_BUCKET = var.textract_bucket
-      DATA_BUCKET     = var.data_bucket
-      AWS_REGION      = var.aws_region
+      RENDERED_BUCKET           = var.rendered_bucket
+      TEXTRACT_BUCKET           = var.textract_bucket
+      DATA_BUCKET               = var.data_bucket
+      TEXTRACT_SNS_TOPIC_ARN    = var.textract_completion_topic_arn
+      TEXTRACT_PUBLISH_ROLE_ARN = var.textract_publish_role_arn
     }
   }
 }
 
-resource "aws_lambda_permission" "allow_s3_start_textract_job" {
-  statement_id  = "AllowS3InvokeStartTextractJob"
+resource "aws_lambda_permission" "allow_stepfunctions_start_textract_job" {
+  statement_id  = "AllowStepFunctionsInvokeStartTextractJob"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.start_textract_job.function_name
-  principal     = "s3.amazonaws.com"
-  source_arn    = "arn:aws:s3:::${var.rendered_bucket}"
-}
-
-resource "aws_s3_bucket_notification" "rendered_image_notification" {
-  bucket = var.rendered_bucket
-
-  lambda_function {
-    lambda_function_arn = aws_lambda_function.start_textract_job.arn
-    events              = ["s3:ObjectCreated:*"]
-    filter_prefix       = ""
-    filter_suffix       = ".jpg"
-  }
-
-  depends_on = [aws_lambda_permission.allow_s3_start_textract_job]
+  principal     = "states.amazonaws.com"
 }
 
 resource "aws_lambda_function" "process_textract_result" {
@@ -120,17 +120,32 @@ resource "aws_lambda_function" "process_textract_result" {
   filename         = data.archive_file.process_textract_result.output_path
   source_code_hash = data.archive_file.process_textract_result.output_base64sha256
 
+  layers = [var.shared_layer_arn]
+
+  depends_on = [aws_cloudwatch_log_group.process_textract_result]
+
   environment {
     variables = {
-      TEXTRACT_BUCKET = var.textract_bucket
-      DATA_BUCKET     = var.data_bucket
-      DB_HOST         = var.db_host
-      DB_NAME         = var.db_name
-      DB_USERNAME     = var.db_username
-      DB_PASSWORD     = var.db_password
-      AWS_REGION      = var.aws_region
+      TEXTRACT_BUCKET     = var.textract_bucket
+      DATA_BUCKET         = var.data_bucket
+      EXPORT_CSV_FUNCTION = aws_lambda_function.export_csv.function_name
     }
   }
+}
+
+# Phase 2 trigger: Textract completion SNS -> process_textract_result.
+resource "aws_sns_topic_subscription" "textract_completion_to_processor" {
+  topic_arn = var.textract_completion_topic_arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.process_textract_result.arn
+}
+
+resource "aws_lambda_permission" "allow_sns_invoke_processor" {
+  statement_id  = "AllowSNSInvokeProcessTextractResult"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.process_textract_result.function_name
+  principal     = "sns.amazonaws.com"
+  source_arn    = var.textract_completion_topic_arn
 }
 
 resource "aws_lambda_function" "export_csv" {
@@ -144,14 +159,13 @@ resource "aws_lambda_function" "export_csv" {
   filename         = data.archive_file.export_csv.output_path
   source_code_hash = data.archive_file.export_csv.output_base64sha256
 
+  layers = [var.trp_layer_arn, var.shared_layer_arn]
+
+  depends_on = [aws_cloudwatch_log_group.export_csv]
+
   environment {
     variables = {
-      DB_HOST     = var.db_host
-      DB_NAME     = var.db_name
-      DB_USERNAME = var.db_username
-      DB_PASSWORD = var.db_password
-      DATA_BUCKET  = var.data_bucket
-      AWS_REGION  = var.aws_region
+      DATA_BUCKET = var.data_bucket
     }
   }
 }

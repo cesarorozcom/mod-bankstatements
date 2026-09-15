@@ -18,7 +18,7 @@ variable "start_textract_arn" {
   type        = string
 }
 
-variable "export_csv_arn" {
-  description = "ARN of the CSV export Lambda"
+variable "incoming_bucket" {
+  description = "Name of the S3 bucket that receives incoming PDFs"
   type        = string
 }

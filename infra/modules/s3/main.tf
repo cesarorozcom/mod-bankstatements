@@ -3,6 +3,13 @@ resource "aws_s3_bucket" "incoming" {
   force_destroy = var.force_destroy
 }
 
+# Enable EventBridge notifications so S3 object events are forwarded to
+# EventBridge, allowing the Step Functions rule to trigger on PDF uploads.
+resource "aws_s3_bucket_notification" "incoming_eventbridge" {
+  bucket      = aws_s3_bucket.incoming.id
+  eventbridge = true
+}
+
 resource "aws_s3_bucket" "rendered" {
   bucket        = "${var.project_name}-${var.environment}-rendered-${var.bucket_suffix}"
   force_destroy = var.force_destroy
