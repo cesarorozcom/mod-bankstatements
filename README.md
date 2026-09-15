@@ -1,51 +1,35 @@
-# Text Extract Demo
+# Bank Statement Extraction Pipeline
 
-This project turns the prototype bank-statement extraction flow into a Terraform-managed AWS serverless pipeline.
+A Terraform-managed AWS serverless pipeline that converts PDF bank statements into structured CSV movement records using Amazon Textract.
 
 ## Documentation status
 
-This README is aligned with:
+This README reflects the current implementation under `infra/` and `lambda/src/`, and is aligned with:
 
-- [ADR 0001: Serverless Textract Orchestration and CSV Data Sink](docs/adr/0001-serverless-textract-orchestration.md)
-- Current implementation under `infra/` and `lambda/src/`
+- [ADR 0001: Serverless Textract Orchestration and CSV Data Sink](docs/adr/0001-serverless-textract-orchestration.md) — original architecture.
+- [ADR 0003: Decoupled Two-Phase Textract Completion via SNS](docs/adr/0003-decoupled-textract-completion-via-sns.md) — the current completion design, which supersedes the earlier polling approach.
 
 ## Architecture overview
 
-The production flow is:
+The pipeline runs in two phases so that it never blocks or polls while Amazon Textract processes documents asynchronously.
 
-1. Upload a PDF to the incoming S3 bucket.
-2. A Lambda function renders each PDF page to JPEG and stores it in the rendered bucket.
-3. A second Lambda starts an AWS Textract analysis job for the rendered page images.
-4. The export Lambda polls Textract by `job_id` (`get_document_analysis`), converts movement rows to CSV, and writes the file to the data bucket in S3.
+Phase 1 is orchestrated by AWS Step Functions and ends as soon as the Textract jobs are started:
 
-This flow is orchestrated by AWS Step Functions with state order:
+1. A PDF is uploaded to the incoming S3 bucket. An EventBridge rule starts the state machine.
+2. The `pdf_to_jpeg` Lambda renders each PDF page to a JPEG and stores it in the rendered bucket.
+3. The `start_textract_job` Lambda starts one asynchronous Textract analysis job per rendered page, attaching an SNS notification channel, then the state machine ends.
 
-`pdf_to_jpeg -> start_textract_job -> export_csv`
+Phase 2 is event-driven and uses no Step Functions transitions:
 
-Each state consumes predecessor output (for example `start_textract_job` reads `rendered_keys` produced by `pdf_to_jpeg`).
+4. Textract publishes a completion message per job to the SNS completion topic.
+5. The `process_textract_result` Lambda, subscribed to that topic, reacts to each completed job and invokes `export_csv` asynchronously.
+6. The `export_csv` Lambda fetches the analysis result, parses movement rows, and writes a CSV to the data bucket under the `exports/` prefix (one CSV per page, named by job id).
 
-Typical payload handoff shape:
-
-```json
-{
-   "status": str,
-   "source_bucket": str,
-   "source_key": str,
-   "rendered_keys": List
-}
-```
-
-`start_textract_job` emits `jobs[*].job_id`; `export_csv` polls `get_document_analysis` until completion and writes CSV artifacts to the data bucket.
-
-This aligns with the current extraction logic in:
-
-- [lambda/src/pdf_to_jpeg/app.py](lambda/src/pdf_to_jpeg/app.py)
-- [lambda/src/start_textract_job/app.py](lambda/src/start_textract_job/app.py)
-- [lambda/src/export_csv/app.py](lambda/src/export_csv/app.py)
-- [lambda/src/shared/s3_utils.py](lambda/src/shared/s3_utils.py)
-- [lambda/src/shared/textract_utils.py](lambda/src/shared/textract_utils.py)
+This decoupling keeps the state machine to a small, constant number of transitions regardless of how long or how many Textract jobs run, which keeps the workflow within a tight free-tier transition budget. See ADR 0003 for the rationale and tradeoffs.
 
 ## Core data model
+
+Each parsed movement row maps to the following fields:
 
 - `movement_id`
 - `operation_date`
@@ -55,114 +39,82 @@ This aligns with the current extraction logic in:
 - `debit`
 - `balance`
 
-The database module adds document metadata and status tracking around the movement rows so the pipeline can manage uploads and processing state.
+## Deployment status
+
+- The infrastructure is deployed and managed through Terraform in the `infra/` directory.
+- The four buckets (incoming, rendered, textract, data) and the SNS completion topic are provisioned by Terraform.
+- The Step Functions state machine, the four Lambda functions, and the SNS-driven completion path are live.
+- Terraform state and variable files (`terraform.tfstate*`, `terraform.tfvars`) are environment specific and are not intended to be shared; keep them out of version control.
 
 ## Directory structure
 
-- `infra/` — Terraform deployment for AWS resources
-- `infra/modules/` — reusable Terraform modules for S3, IAM, Lambda, database, and Step Functions
-- `lambda/src/pdf_to_jpeg/` — PDF page rendering to JPEG
-- `lambda/src/start_textract_job/` — starts Textract async analysis per rendered image
-- `lambda/src/export_csv/` — polls Textract jobs and writes CSV to data bucket
-- `lambda/src/shared/` — shared S3/Textract utilities for Lambda reuse
-- `lambda/src/process_textract_result/` — non-orchestrated parser module kept for optional/legacy use
-- `docs/adr/` — architecture decision records
-- `docs/` — sample Textract outputs and local JSON fixtures
+- `infra/` — Terraform deployment for AWS resources.
+- `infra/modules/s3/` — incoming, rendered, textract, and data buckets.
+- `infra/modules/iam/` — shared Lambda execution role and least-privilege policies.
+- `infra/modules/lambda/` — the four Lambda functions plus the SNS subscription and invoke wiring.
+- `infra/modules/layers/` — Lambda layers (PyMuPDF, Textract response parser, shared utilities).
+- `infra/modules/messaging/` — SNS completion topic and the role Textract assumes to publish to it.
+- `infra/modules/stepfunctions/` — the Phase 1 state machine and the EventBridge trigger.
+- `lambda/src/pdf_to_jpeg/` — renders PDF pages to JPEG.
+- `lambda/src/start_textract_job/` — starts asynchronous Textract jobs with an SNS notification channel.
+- `lambda/src/process_textract_result/` — reacts to Textract completion and invokes the exporter.
+- `lambda/src/export_csv/` — parses Textract results and writes CSV to the data bucket.
+- `lambda/src/shared/` — shared S3 and Textract helper utilities.
+- `docs/adr/` — architecture decision records.
 
 ## Prerequisites
 
-Before you run the deployment, install:
+- Terraform v1.5 or later.
+- AWS CLI configured with credentials for the target account.
+- Python 3.12 (the Lambda runtime) for local validation of function source.
 
-- Terraform v1.5+
-- AWS CLI configured with credentials for your target account
-- Python 3.11+
-- `pip` and `virtualenv` if you want to validate the Lambda code locally
+## Configuration
 
-## Terraform deployment
+Deployment is configured through three Terraform variables, all with defaults in `infra/variables.tf`:
 
-1. Change into the `infra` directory:
+- `aws_region` — target region (default `us-east-1`).
+- `project_name` — name prefix applied to all resources.
+- `environment` — environment suffix, such as `dev`.
 
-   ```bash
-   cd infra
-   ```
+Override any of these in a `terraform.tfvars` file or on the command line. No database or credential variables are required; the pipeline has no database component.
 
-2. Copy the example variables file:
+## Deployment
 
-   ```bash
-   cp terraform.tfvars.example terraform.tfvars
-   ```
+Run the standard Terraform lifecycle from the `infra/` directory:
 
-3. Edit `terraform.tfvars` with your values:
+- Initialize providers and modules: `terraform init`
+- Validate the configuration: `terraform validate`
+- Preview changes: `terraform plan`
+- Apply the stack: `terraform apply`
 
-   - `aws_region`
-   - `project_name`
-   - `environment`
-   - `db_username`
-   - `db_password`
-
-4. Initialize Terraform:
-
-   ```bash
-   terraform init
-   ```
-
-5. Validate the configuration:
-
-   ```bash
-   terraform validate
-   ```
-
-6. Create the deployment plan:
-
-   ```bash
-   terraform plan
-   ```
-
-7. Apply the stack:
-
-   ```bash
-   terraform apply
-   ```
-
-### Optional local checks
-
-```bash
-source .venv/bin/activate
-python -m compileall lambda/src
-```
-
-If `terraform` is not installed in your environment, install it first before running `init/validate/plan`.
-
-## Lambda build notes
-
-The Terraform configuration packages the source files under `lambda/src/` into ZIP archives automatically when `terraform apply` runs. The included skeleton functions are intentionally simple and ready to be extended with production-grade validation, retries, and database inserts.
-
-Shared reusable utilities live under `lambda/src/shared/` (for example `s3_utils.py` and `textract_utils.py`) and are included in Lambda packaging for cross-function reuse.
-
-Current orchestration target is the 3-step workflow in ADR 0001. `process_textract_result` remains available but is not in the active state machine path.
+Terraform packages the Lambda source under `lambda/src/` into deployment archives automatically during `apply`, so no separate build step is required.
 
 ## AWS permissions
 
-The IAM module creates the execution role used by the Lambda functions. It grants the needed least-privilege access for:
+The IAM module creates the execution role shared by the Lambda functions, granting least-privilege access for:
 
-- S3 object read/write access to the relevant buckets
-- Textract analysis job access
-- CloudWatch Logs access
-- Database connectivity via environment variables
+- S3 read and write access scoped to the project buckets.
+- Textract analysis operations.
+- Passing the Textract publish role (scoped to the Textract service) so completion notifications can be sent.
+- Invoking the `export_csv` function from the completion handler.
+- CloudWatch Logs access.
+
+The `messaging` module creates a separate role that Amazon Textract assumes solely to publish completion messages to the SNS topic.
 
 ## Security recommendations
 
-- Store database credentials in AWS Secrets Manager or environment secrets instead of hardcoded values.
-- Keep the bucket policy restricted to the Lambda execution role and the required admin identities.
-- Use a dedicated VPC or subnet setup for the database if your environment requires tighter network isolation.
+- Keep Terraform state and `terraform.tfvars` out of version control; they can contain account identifiers and other environment detail.
+- Restrict bucket access to the Lambda execution role and required admin identities.
+- Store any secrets in AWS Secrets Manager rather than in variables or environment values.
 
-## Next steps
+## Known gaps and next steps
 
-1. Add robust pagination handling checks for all Textract polling paths.
-2. Move DB credentials to AWS Secrets Manager.
-3. Add dead-letter queues and retry policies for failed stages.
-4. Add ADR 0002 for idempotency and duplicate-processing prevention.
+- No dead-letter queue or retry policy yet on the SNS to `process_textract_result` to `export_csv` path.
+- Output is one CSV per page; consolidating to a single CSV per source document would require an aggregation step.
+- Textract result pagination should be verified across all parsing paths.
+- Single-execution traceability is reduced by the decoupled design; correlation across stages relies on the Textract job id in CloudWatch logs.
 
 ## Architecture Decision Records
 
 - [docs/adr/0001-serverless-textract-orchestration.md](docs/adr/0001-serverless-textract-orchestration.md)
+- [docs/adr/0003-decoupled-textract-completion-via-sns.md](docs/adr/0003-decoupled-textract-completion-via-sns.md)
